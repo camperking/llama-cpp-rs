@@ -7,6 +7,33 @@ use std::fmt::{Debug, Formatter};
 use std::pin::Pin;
 use std::ptr::null;
 
+/// Result of [`LlamaModelParams::fit_params`], containing the fitted context size.
+#[derive(Debug, Clone)]
+pub struct FitResult {
+    /// The context size after fitting (may have been reduced from the requested value).
+    pub n_ctx: u32,
+}
+
+/// Error returned by [`LlamaModelParams::fit_params`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FitError {
+    /// Could not find allocations that are projected to fit.
+    Failure,
+    /// A hard error occurred during fitting.
+    Error,
+}
+
+impl std::fmt::Display for FitError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FitError::Failure => write!(f, "could not find allocations that fit available memory"),
+            FitError::Error => write!(f, "hard error during parameter fitting"),
+        }
+    }
+}
+
+impl std::error::Error for FitError {}
+
 pub mod kv_overrides;
 
 #[allow(clippy::cast_possible_wrap)]
@@ -119,6 +146,7 @@ pub struct LlamaModelParams {
     kv_overrides: Vec<llama_cpp_sys_2::llama_model_kv_override>,
     buft_overrides: Vec<llama_cpp_sys_2::llama_model_tensor_buft_override>,
     devices: Pin<Box<[llama_cpp_sys_2::ggml_backend_dev_t; LLAMA_CPP_MAX_DEVICES]>>,
+    tensor_split: Vec<f32>,
 }
 
 impl Debug for LlamaModelParams {
@@ -254,6 +282,88 @@ impl LlamaModelParams {
 
         // set the pointer to the (potentially) new vector
         self.params.tensor_buft_overrides = self.buft_overrides.as_ptr();
+    }
+}
+
+impl LlamaModelParams {
+    /// Automatically fit model parameters to available device memory.
+    ///
+    /// Calls `llama_params_fit` which determines the optimal `n_gpu_layers`,
+    /// `tensor_split`, and `tensor_buft_overrides` based on available VRAM.
+    ///
+    /// # Requirements
+    ///
+    /// - `n_gpu_layers` must be at its default (`-1`). Do not call [`with_n_gpu_layers`](Self::with_n_gpu_layers)
+    ///   before this.
+    /// - `tensor_buft_overrides` must not be set. Do not call [`add_cpu_buft_override`](Self::add_cpu_buft_override)
+    ///   before this.
+    ///
+    /// # Arguments
+    ///
+    /// - `model_path` — Path to the GGUF model file (as a C string).
+    /// - `cparams` — Raw context parameters. If `n_ctx` is 0, fit may auto-select it;
+    ///   if non-zero, fit will not modify it.
+    /// - `margins` — Memory margin per device in bytes. Must have at least `llama_max_devices()` elements.
+    /// - `n_ctx_min` — Minimum context size to preserve when reducing memory usage.
+    /// - `log_level` — Minimum log level for fitting output (e.g. `GGML_LOG_LEVEL_INFO`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FitError::Failure`] if no fitting allocation could be found, or
+    /// [`FitError::Error`] on a hard error.
+    pub fn fit_params(
+        mut self: Pin<&mut Self>,
+        model_path: &CStr,
+        cparams: &mut llama_cpp_sys_2::llama_context_params,
+        margins: &mut [usize],
+        n_ctx_min: u32,
+        log_level: u32,
+    ) -> Result<FitResult, FitError> {
+        let max_devices = unsafe { llama_cpp_sys_2::llama_max_devices() };
+        let max_buft = unsafe { llama_cpp_sys_2::llama_max_tensor_buft_overrides() };
+
+        // Allocate tensor_split buffer
+        self.tensor_split.clear();
+        self.tensor_split.resize(max_devices, 0.0);
+
+        // Reset and resize buft_overrides for fit output (null-terminated)
+        self.buft_overrides.clear();
+        self.buft_overrides.resize(
+            max_buft + 1,
+            llama_cpp_sys_2::llama_model_tensor_buft_override {
+                pattern: std::ptr::null(),
+                buft: std::ptr::null_mut(),
+            },
+        );
+
+        // Clear pointers for safety before the call
+        self.params.tensor_split = null() as *const f32;
+        self.params.tensor_buft_overrides = null();
+
+        let status = unsafe {
+            llama_cpp_sys_2::llama_params_fit(
+                model_path.as_ptr(),
+                &mut self.params,
+                cparams,
+                self.tensor_split.as_mut_ptr(),
+                self.buft_overrides.as_mut_ptr(),
+                margins.as_mut_ptr(),
+                n_ctx_min,
+                log_level,
+            )
+        };
+
+        match status {
+            llama_cpp_sys_2::LLAMA_PARAMS_FIT_STATUS_SUCCESS => {}
+            llama_cpp_sys_2::LLAMA_PARAMS_FIT_STATUS_FAILURE => return Err(FitError::Failure),
+            _ => return Err(FitError::Error),
+        }
+
+        // Wire the owned buffers into the raw params
+        self.params.tensor_split = self.tensor_split.as_ptr();
+        self.params.tensor_buft_overrides = self.buft_overrides.as_ptr();
+
+        Ok(FitResult { n_ctx: cparams.n_ctx })
     }
 }
 
@@ -462,6 +572,7 @@ impl Default for LlamaModelParams {
                 buft: std::ptr::null_mut(),
             }],
             devices: Box::pin([std::ptr::null_mut(); 16]),
+            tensor_split: Vec::new(),
         }
     }
 }
