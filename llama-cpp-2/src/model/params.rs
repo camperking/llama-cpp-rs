@@ -349,7 +349,7 @@ impl LlamaModelParams {
                 self.buft_overrides.as_mut_ptr(),
                 margins.as_mut_ptr(),
                 n_ctx_min,
-                log_level,
+                log_level as i32,
             )
         };
 
