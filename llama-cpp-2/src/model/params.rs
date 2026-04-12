@@ -340,6 +340,11 @@ impl LlamaModelParams {
         self.params.tensor_split = null() as *const f32;
         self.params.tensor_buft_overrides = null();
 
+        #[cfg(target_os = "windows")]
+        let log_level_arg: i32 = log_level as i32;
+        #[cfg(not(target_os = "windows"))]
+        let log_level_arg: u32 = log_level;
+
         let status = unsafe {
             llama_cpp_sys_2::llama_params_fit(
                 model_path.as_ptr(),
@@ -349,7 +354,7 @@ impl LlamaModelParams {
                 self.buft_overrides.as_mut_ptr(),
                 margins.as_mut_ptr(),
                 n_ctx_min,
-                log_level as i32,
+                log_level_arg,
             )
         };
 
