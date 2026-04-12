@@ -863,6 +863,25 @@ pub fn mtmd_default_marker() -> &'static str {
     }
 }
 
+/// Silence all MTMD/clip logging output.
+///
+/// This sets a no-op callback for both the MTMD helper logger and the MTMD/clip logger
+/// (since `mtmd_helper_log_set` internally calls `mtmd_log_set`).
+/// Without this, MTMD logs go directly to stderr even when llama.cpp's main
+/// logger has been silenced via [`LlamaBackend::void_logs`].
+pub fn void_mtmd_logs() {
+    unsafe extern "C" fn void_log(
+        _level: llama_cpp_sys_2::ggml_log_level,
+        _text: *const ::std::os::raw::c_char,
+        _user_data: *mut ::std::os::raw::c_void,
+    ) {
+    }
+
+    unsafe {
+        llama_cpp_sys_2::mtmd_helper_log_set(Some(void_log), std::ptr::null_mut());
+    }
+}
+
 // Error types
 /// Errors that can occur when initializing MTMD context
 #[derive(thiserror::Error, Debug)]
