@@ -346,7 +346,7 @@ impl LlamaModelParams {
         );
 
         // Clear pointers for safety before the call
-        self.params.tensor_split = null() as *const f32;
+        self.params.tensor_split = null::<f32>();
         self.params.tensor_buft_overrides = null();
 
         #[cfg(target_os = "windows")]
@@ -357,7 +357,7 @@ impl LlamaModelParams {
         let status = unsafe {
             llama_cpp_sys_2::llama_params_fit(
                 model_path.as_ptr(),
-                &mut self.params,
+                &raw mut self.params,
                 cparams,
                 self.tensor_split.as_mut_ptr(),
                 self.buft_overrides.as_mut_ptr(),
